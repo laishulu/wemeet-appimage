@@ -1,0 +1,103 @@
+name: Build and Release by Tag 
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build AppImage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required permission to push commits, create tags, and publish releases
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build AppImage
+        run: |
+          if [ ! -f "version.txt" ]; then
+            echo "Error: version.txt not found!" >&2
+            exit 1
+          fi
+          APP_VERSION="$(tr -d '[:space:]' < version.txt)"
+
+          # Use the exact Git tag pushed by the user; fallback to version-branch on manual workflow_dispatch
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          else
+            # 截取当前 commit SHA 的前 7 位
+            SHORT_SHA="${GITHUB_SHA::7}"
+            RELEASE_TAG="v${APP_VERSION}-${SHORT_SHA}"
+          fi
+
+          echo "APP Version: ${APP_VERSION}"
+          echo "Release Tag: ${RELEASE_TAG}"
+
+          # Allow unfree packages and build the flake output
+          NIXPKGS_ALLOW_UNFREE=1 nix build .#appimage
+
+          # Target asset names using the exact tag
+          OUTPUT_APPIMAGE="WeMeet-${APP_VERSION}-${RELEASE_TAG}-x86_64.AppImage"
+          OUTPUT_ZSYNC="${OUTPUT_APPIMAGE}.zsync"
+
+          # Extract artifacts from the result directory
+          SRC_APPIMAGE="$(find -L result -maxdepth 1 -type f -name '*.AppImage' | head -n 1)"
+          SRC_ZSYNC="$(find -L result -maxdepth 1 -type f -name '*.zsync' | head -n 1)"
+
+          if [ -z "$SRC_APPIMAGE" ]; then
+            echo "Error: Built .AppImage not found in result/" >&2
+            exit 1
+          fi
+
+          cp -L "$SRC_APPIMAGE" "${OUTPUT_APPIMAGE}"
+          chmod +x "${OUTPUT_APPIMAGE}"
+
+          # Re-index zsync for the final filename if zsyncmake is available, otherwise copy directly
+          if [ -n "$SRC_ZSYNC" ]; then
+            if command -v zsyncmake &>/dev/null; then
+              zsyncmake -u "${OUTPUT_APPIMAGE}" -o "${OUTPUT_ZSYNC}" "${OUTPUT_APPIMAGE}"
+            else
+              cp -L "$SRC_ZSYNC" "${OUTPUT_ZSYNC}"
+            fi
+          fi
+
+          # Inspect generated assets
+          ls -lh "${OUTPUT_APPIMAGE}" "${OUTPUT_ZSYNC}"
+
+          # Export environment variables for the downstream release step
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          echo "APPIMAGE_ASSET=${OUTPUT_APPIMAGE}" >> "$GITHUB_ENV"
+          echo "ZSYNC_ASSET=${OUTPUT_ZSYNC}" >> "$GITHUB_ENV"
+
+      - name: Create Release and Upload Asset
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "WeMeet v${{ env.APP_VERSION }} (${{ env.RELEASE_TAG }})"
+          files: |
+            ${{ env.APPIMAGE_ASSET }}
+            ${{ env.ZSYNC_ASSET }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
