@@ -86,10 +86,19 @@ fi
 echo "Version : $PKGVER"
 echo "Base URL: $DEB_URL"
 
-echo "==> 3. Updating version.txt..."
+echo "==> 3. Updating latest.txt..."
+date -u -Iseconds > latest.txt
+
+echo "==> 4. Updating version.txt..."
 echo "$PKGVER" > "$VERSION_FILE"
 
-echo "==> 4. Fetching AUR Git revision and hash..."
+# Check if already up to date
+if [ -f "$VERSION_FILE" ] && [ "$(cat "$VERSION_FILE")" = "$PKGVER" ]; then
+  echo "==> Package is already up to date ($PKGVER). Exiting."
+  exit 0
+fi
+
+echo "==> 5. Fetching AUR Git revision and hash..."
 AUR_GIT_JSON=$(nix-prefetch-git --url "https://aur.archlinux.org/wemeet-bin.git" --rev "HEAD" --quiet)
 AUR_REV=$(echo "$AUR_GIT_JSON" | jq -r '.rev')
 WRAP_HASH=$(echo "$AUR_GIT_JSON" | jq -r '.hash')
@@ -97,7 +106,7 @@ WRAP_HASH=$(echo "$AUR_GIT_JSON" | jq -r '.hash')
 echo "AUR Commit: $AUR_REV"
 echo "Wrap Hash : $WRAP_HASH"
 
-echo "==> 5. Calculating SRI hash for deb package..."
+echo "==> 6. Calculating SRI hash for deb package..."
 if [[ "${SHA512:-}" =~ ^[a-fA-F0-9]{128}$ ]]; then
   DEB_HASH=$(nix-hash --type sha512 --to-sri "$SHA512")
 elif [[ "${SHA256:-}" =~ ^[a-fA-F0-9]{64}$ ]]; then
@@ -110,7 +119,7 @@ fi
 
 echo "Deb Hash  : $DEB_HASH"
 
-echo "==> 6. Updating $NIX_FILE..."
+echo "==> 7. Updating $NIX_FILE..."
 python3 -c "
 import re
 
@@ -154,8 +163,5 @@ content = re.sub(
 with open('$NIX_FILE', 'w') as f:
     f.write(content)
 "
-
-echo "==> 7. Updating latest.txt..."
-date -u -Iseconds > latest.txt
 
 echo "==> Successfully updated $NIX_FILE!"
