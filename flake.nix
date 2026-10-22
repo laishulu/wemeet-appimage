@@ -1,5 +1,5 @@
 {
-  description = "Tencent Meeting (WeMeet) Standalone AppImage Build Configuration";
+  description = "Tencent Meeting (WeMeet) Native FHS AppImage Build Configuration";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/7fd4004d0511991fff3a0524856a9be09e28c5f0";
@@ -13,10 +13,16 @@
         config.allowUnfree = true;
       };
 
-      # Compile libwemeetwrap from the latest AUR wemeet-bin commit (ce20a7f)
+      wemeetConfig = {
+        version = "3.26.10.401";
+        url = "https://updatecdn.meeting.qq.com/cos/72e0e0023e1d1e6d4123fba28821aea1/TencentMeeting_0300000000_3.26.10.401_x86_64_default.publish.deb";
+        hash = "sha512-rKoeuo7M06W9TLV9wPrc5cM5UIV2d3g5RKwr++++2SfKO0t9nQyehk3Nw7n5+KNZxFbptjs4rA+pQ2/DNqqepw==";
+      };
+
+      # Compile libwemeetwrap from the latest AUR wemeet-bin commit
       libwemeetwrap = pkgs.stdenv.mkDerivation {
         pname = "libwemeetwrap";
-        version = "3.26.10.401";
+        version = wemeetConfig.version;
 
         src = pkgs.fetchgit {
           url = "https://aur.archlinux.org/wemeet-bin.git";
@@ -44,233 +50,102 @@
         '';
       };
 
-      # Minimum set of shared libraries required for runtime and dynamic loading (dlopen)
-      wemeetLibs = with pkgs; [
-        nss
-        nspr
-        libxtst
-        alsa-lib
-        libpulseaudio
-        wayland
-        libGL
-        libdrm
-        libsm
-        libice
-        fontconfig
-        harfbuzz
-      ];
+      debFile = pkgs.fetchurl {
+        url = wemeetConfig.url;
+        hash = wemeetConfig.hash;
+      };
 
-      # Main package derivation and patching
-      wemeet = pkgs.stdenv.mkDerivation {
-        pname = "wemeet";
-        version = "3.26.10.401";
+      appimageRuntime = pkgs.fetchurl {
+        url = "https://github.com/AppImage/type2-runtime/releases/latest/download/runtime-x86_64";
+        hash = "sha256-YXqncxTVfIuOT66cPws1r3sw1VKctp6Y9k+SUQ7ZikY=";
+      };
 
-        src = pkgs.fetchurl {
-          url = "https://updatecdn.meeting.qq.com/cos/72e0e0023e1d1e6d4123fba28821aea1/TencentMeeting_0300000000_3.26.10.401_x86_64_default.publish.deb";
-          hash = "sha512-rKoeuo7M06W9TLV9wPrc5cM5UIV2d3g5RKwr++++2SfKO0t9nQyehk3Nw7n5+KNZxFbptjs4rA+pQ2/DNqqepw==";
-        };
+      appimagetool = pkgs.fetchurl {
+        url = "https://github.com/AppImage/appimagetool/releases/latest/download/appimagetool-x86_64.AppImage";
+        hash = "sha256-lcvnzOlxf86QxITjQFLufH8ddjWzPBJSW0d2gmp9KbY=";
+      };
+
+      appimage = pkgs.stdenvNoCC.mkDerivation {
+        pname = "wemeet-appimage";
+        version = wemeetConfig.version;
+        src = debFile;
 
         nativeBuildInputs = with pkgs; [
-          dpkg
-          autoPatchelfHook
-          makeWrapper
+          binutils
+          gnutar
+          xz
+          file
+          zsync
         ];
 
-        buildInputs = wemeetLibs;
+        # Keep upstream FHS dynamic linking without nix-specific patchelf
+        dontPatchELF = true;
+        dontStrip = true;
 
-        dontWrapQtApps = true;
+        unpackPhase = ''
+          runHook preUnpack
+          ar x $src
+          tar -xf data.tar.xz
+          runHook postUnpack
+        '';
 
         installPhase = ''
           runHook preInstall
 
-          mkdir -p $out/app $out/share
-          cp -r opt/wemeet $out/app/wemeet
-          cp -r usr/share/* $out/share/
+          mkdir -p AppDir/opt/wemeet AppDir/usr/bin AppDir/usr/share AppDir/usr/lib
 
-          # Remove official bundled libcurl to prevent missing OpenSSL 1.1 errors
-          rm -f $out/app/wemeet/lib/libcurl.so
+          # 1. Copy wemeet core binaries & assets
+          cp -r opt/wemeet/* AppDir/opt/wemeet/
+          cp -r usr/share/* AppDir/usr/share/
 
-          # Adjust desktop shortcut entry and icon reference
-          substituteInPlace $out/share/applications/wemeetapp.desktop \
+          # Remove bundled libcurl to avoid OpenSSL 1.1 dependency conflict
+          rm -f AppDir/opt/wemeet/lib/libcurl.so* || true
+
+          # Inject compiled AUR wrapper library
+          cp ${libwemeetwrap}/lib/libwemeetwrap.so AppDir/opt/wemeet/lib/
+
+          # Critical fix: Coroutine register context restoration assembly bug on modern glibc
+          echo -ne '\x49\x83\xfc\x00' | dd of=AppDir/opt/wemeet/lib/libwemeet_base.so bs=1 seek=$((0x94c833)) conv=notrunc
+
+          # Fix internal relative symlinks required by xcast engine
+          ln -sf raw/xcast.conf AppDir/opt/wemeet/bin/xcast.conf
+          ln -sf ../plugins AppDir/opt/wemeet/lib/plugins
+          ln -sf ../resources AppDir/opt/wemeet/lib/resources
+          ln -sf ../translations AppDir/opt/wemeet/lib/translations
+
+          # 2. Setup desktop integration and icons
+          if [ -d "AppDir/opt/wemeet/icons" ]; then
+            cp -r AppDir/opt/wemeet/icons AppDir/usr/share/icons || true
+          fi
+          install -Dm0644 AppDir/opt/wemeet/wemeet.svg AppDir/usr/share/icons/hicolor/scalable/apps/wemeet.svg
+
+          substituteInPlace AppDir/usr/share/applications/wemeetapp.desktop \
             --replace-fail "/opt/wemeet/wemeetapp.sh" "wemeet" \
             --replace-fail "/opt/wemeet/wemeet.svg" "wemeet"
 
-          # Redirect Qt configuration prefix to the Nix store path
-          substituteInPlace $out/app/wemeet/bin/qt.conf \
-            --replace-fail "Prefix = ../" "Prefix = $out/app/wemeet/lib"
-
-          # Install icons
-          if [ -d "$out/app/wemeet/icons" ]; then
-            cp -r $out/app/wemeet/icons $out/share/icons || true
-          fi
-          install -Dm0644 $out/app/wemeet/wemeet.svg $out/share/icons/hicolor/scalable/apps/wemeet.svg
-
-          # Establish internal relative symlinks required by xcast engine
-          ln -sf raw/xcast.conf $out/app/wemeet/bin/xcast.conf
-          ln -s $out/app/wemeet/plugins $out/app/wemeet/lib/plugins
-          ln -s $out/app/wemeet/resources $out/app/wemeet/lib/resources
-          ln -s $out/app/wemeet/translations $out/app/wemeet/lib/translations
-
-          # Search paths for autoPatchelfHook
-          addAutoPatchelfSearchPath "$out/app/wemeet/lib"
-          addAutoPatchelfSearchPath "$out/app/wemeet/bin/modules"
-
-          runHook postInstall
-        '';
-
-        postInstall = ''
-          # Critical fix: Coroutine register context restoration assembly bug on modern glibc (cmp rdi, 0 -> cmp r12, 0)
-          echo -ne '\x49\x83\xfc\x00' | dd of=$out/app/wemeet/lib/libwemeet_base.so bs=1 seek=$((0x94c833)) conv=notrunc
-
-          # Strip Tencent internal binaries and shared objects
-          find $out/app/wemeet -type f \( -name "*.so*" -o -executable \) -exec strip --strip-unneeded {} + 2>/dev/null || true
-        '';
-
-        preFixup =
-          let
-            fullLibPath = pkgs.lib.makeLibraryPath wemeetLibs;
-
-            fontsConf = pkgs.writeText "fonts.conf" ''
-              <?xml version="1.0"?>
-              <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-              <fontconfig>
-                <dir>/usr/share/fonts</dir>
-                <dir>/usr/local/share/fonts</dir>
-                <dir>/run/current-system/sw/share/fonts</dir>
-                <dir prefix="xdg">fonts</dir>
-                <dir>~/.fonts</dir>
-                <dir>${pkgs.wqy_microhei}/share/fonts</dir>
-                <cachedir prefix="xdg">fontconfig</cachedir>
-                <cachedir>/tmp/fontconfig-cache</cachedir>
-              </fontconfig>
-            '';
-          in
-          ''
-            mkdir -p $out/bin
-
-            # Wrapper script to switch working directory and export audio runtime socket
-            cat << 'EOF' > $out/bin/wemeet
-            #!${pkgs.bash}/bin/bash
-            export LP_NUM_THREADS=2
-            export XDG_SESSION_TYPE=x11
-            export QT_QPA_PLATFORM=xcb
-            unset WAYLAND_DISPLAY
-            export QT_STYLE_OVERRIDE=fusion
-            export IBUS_USE_PORTAL=1
-            export FONTCONFIG_FILE="@fontsConf@"
-            export XKB_CONFIG_ROOT="@xkbRoot@"
-
-            # Search host DRI locations dynamically (avoids bundling Mesa/LLVM into closure)
-            export LIBGL_DRIVERS_PATH="/run/opengl-driver/lib/dri:/usr/lib/x86_64-linux-gnu/dri:/usr/lib64/dri:/usr/lib/dri''${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
-
-            # Automatically probe PulseAudio / PipeWire runtime socket
-            if [ -z "$PULSE_SERVER" ]; then
-              if [ -S "''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native" ]; then
-                export PULSE_SERVER="unix:''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native"
-              elif [ -S "/run/user/$(id -u)/pulse/native" ]; then
-                export PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native"
-              fi
-            fi
-
-            export PATH="@out@/app/wemeet/bin:$PATH"
-            export QT_PLUGIN_PATH="@out@/app/wemeet/plugins"
-            export LD_LIBRARY_PATH="@out@/app/wemeet/lib:@out@/app/wemeet/bin/modules:@out@/app/wemeet/translations:${libwemeetwrap}/lib:@fullLibPath@"
-            export LD_PRELOAD="${libwemeetwrap}/lib/libwemeetwrap.so''${LD_PRELOAD:+:$LD_PRELOAD}"
-
-            # Essential: Change directory so xcast engine locates relative modules correctly
-            cd "@out@/app/wemeet/bin"
-            exec "@out@/app/wemeet/bin/wemeetapp" "$@"
-            EOF
-
-            substituteInPlace $out/bin/wemeet \
-              --replace-fail "@fontsConf@" "${fontsConf}" \
-              --replace-fail "@xkbRoot@" "${pkgs.xkeyboard_config}/share/X11/xkb" \
-              --replace-fail "@out@" "$out" \
-              --replace-fail "@fullLibPath@" "${fullLibPath}"
-
-            chmod +x $out/bin/wemeet
-          '';
-
-        meta = {
-          description = "Tencent Meeting Linux Client";
-          mainProgram = "wemeet";
-          platforms = [ "x86_64-linux" ];
-        };
-      };
-
-      # Official standard AppImage runtime (Type-2 runtime)
-      appimageRuntime = pkgs.fetchurl {
-        url = "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64";
-        hash = "sha256-FW9L296cUtAYFGAAE+Cic/ARjcLemJdfPIxjQn7HkHQ=";
-      };
-
-      # Upstream static PRoot binary used when unprivileged bubblewrap is unavailable
-      prootStatic = pkgs.fetchurl {
-        url = "https://github.com/proot-me/proot/releases/download/v5.5.0/proot";
-        hash = "sha256-2xhTAKnaq7zoasp2MtjH/cQkn28VMXGVQBO3DF9JHsA=";
-      };
-
-      # Assemble self-contained portable AppImage
-      appimage = pkgs.stdenv.mkDerivation {
-        name = "TencentMeeting-${wemeet.version}-x86_64.AppImage";
-        nativeBuildInputs = [
-          pkgs.squashfsTools
-          pkgs.binutils
-          pkgs.coreutils
-          pkgs.zsync
-        ];
-        closureInfo = pkgs.closureInfo { rootPaths = [ wemeet ]; };
-
-        buildCommand = ''
-          mkdir -p AppDir/nix/store
-          while IFS= read -r path; do
-            cp -a "$path" AppDir/nix/store/
-          done < "$closureInfo/store-paths"
-
-          # Clean up dev/doc/static files from the copied store closure
-          chmod -R u+w AppDir/nix/store
-          rm -rf AppDir/nix/store/*/{share/doc,share/man,share/info,include,lib/pkgconfig}
-          find AppDir/nix/store -type f \( -name "*.a" -o -name "*.la" \) -delete
-          find AppDir/nix/store -type f \( -name "*.so*" -o -perm -0100 \) -exec strip --strip-unneeded {} + 2>/dev/null || true
-
-          # Bundle static bubblewrap and static proot
-          cp ${pkgs.pkgsStatic.bubblewrap}/bin/bwrap AppDir/bwrap
-          chmod +x AppDir/bwrap
-          strip --strip-unneeded AppDir/bwrap 2>/dev/null || true
-
-          cp ${prootStatic} AppDir/proot
-          chmod +x AppDir/proot
-
-          # 1. Desktop integration setup
-          mkdir -p AppDir/usr/share
-          cp -r "${wemeet}/share/"* AppDir/usr/share/
-          ln -sf usr/share/applications/wemeetapp.desktop AppDir/
-          ln -sf usr/share/icons/hicolor/scalable/apps/wemeet.svg AppDir/
+          ln -sf usr/share/applications/wemeetapp.desktop AppDir/wemeetapp.desktop
+          ln -sf usr/share/icons/hicolor/scalable/apps/wemeet.svg AppDir/wemeet.svg
           ln -sf wemeet.svg AppDir/.DirIcon
 
-          # 2. Binary symlinks
-          mkdir -p AppDir/bin
-          ln -s ${wemeet}/bin/wemeet AppDir/bin/wemeet
-          ln -s ${wemeet}/bin/wemeet AppDir/entrypoint
-
-          # 3. AppRun multiplexer script with shared binds
+          # 3. Create native AppRun entrypoint
           cat << 'EOF' > AppDir/AppRun
           #!/usr/bin/env bash
           set -e
 
-          # 1. Accurately locate mounted AppDir root
-          HERE="''${APPDIR:-$(dirname "$(readlink -f "''${BASH_SOURCE[0]}")")}"
-          INVOKED_NAME="$(basename "''${ARGV0:-$0}")"
+          export APPDIR="''${APPDIR:-$(dirname "$(readlink -f "''${BASH_SOURCE[0]}")")}"
+          WEMEET_OPT="$APPDIR/opt/wemeet"
 
-          # 2. Determine target binary
-          TARGET="$(readlink "$HERE/entrypoint")"
-          TARGET="''${TARGET:-${wemeet}/bin/wemeet}"
-
-          # Shared environment setup
+          # Display backend compatibility
           export XDG_SESSION_TYPE=x11
           export QT_QPA_PLATFORM=xcb
           unset WAYLAND_DISPLAY
+          export QT_STYLE_OVERRIDE=fusion
+          export IBUS_USE_PORTAL=1
 
+          # DRI drivers for hardware acceleration
+          export LIBGL_DRIVERS_PATH="/run/opengl-driver/lib/dri:/usr/lib/x86_64-linux-gnu/dri:/usr/lib64/dri:/usr/lib/dri''${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
+
+          # PulseAudio / PipeWire runtime socket probing
           if [ -z "$PULSE_SERVER" ]; then
             if [ -S "''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native" ]; then
               export PULSE_SERVER="unix:''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native"
@@ -279,99 +154,53 @@
             fi
           fi
 
-          # Fast path: Native NixOS host execution
-          if [ -x "$TARGET" ]; then
-            exec "$TARGET" "$@"
-          fi
+          export PATH="$WEMEET_OPT/bin:$PATH"
+          export QT_PLUGIN_PATH="$WEMEET_OPT/plugins"
+          export XDG_DATA_DIRS="$APPDIR/usr/share:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 
-          # Collect shared filesystem mount paths (storage, system fonts, DRI drivers)
-          COMMON_BINDS=()
-          for d in /media /mnt /run/media; do
-            [ -d "$d" ] && COMMON_BINDS+=("$d")
-          done
-
-          for d in /usr/share/fonts /usr/local/share/fonts /etc/fonts; do
-            [ -d "$d" ] && COMMON_BINDS+=("$d")
-          done
-
-          for d in /run/opengl-driver/lib/dri /usr/lib/x86_64-linux-gnu/dri /usr/lib64/dri /usr/lib/dri; do
-            [ -d "$d" ] && COMMON_BINDS+=("$d")
-          done
-
-          # Probe whether unprivileged bubblewrap can construct a user namespace
-          CAN_BWRAP=0
-          if [ -x "$HERE/bwrap" ] && "$HERE/bwrap" --ro-bind / / true >/dev/null 2>&1; then
-            CAN_BWRAP=1
-          fi
-
-          # Execution branches: bubblewrap first, fallback to proot
-          if [ "$CAN_BWRAP" -eq 1 ]; then
-            BWRAP_ARGS=()
-            for d in /*; do
-              case "$d" in
-                /proc|/dev|/sys|/tmp|/run|/var|/nix|/home|/root|/media|/mnt) ;;
-                *) [ -d "$d" ] && BWRAP_ARGS+=(--ro-bind "$d" "$d") ;;
-              esac
-            done
-
-            for d in "''${COMMON_BINDS[@]}"; do
-              BWRAP_ARGS+=(--bind "$d" "$d")
-            done
-
-            exec "$HERE/bwrap" \
-              "''${BWRAP_ARGS[@]}" \
-              --proc /proc \
-              --dev-bind /dev /dev \
-              --ro-bind /sys /sys \
-              --bind /tmp /tmp \
-              --bind /run /run \
-              --bind /var /var \
-              --bind "$HOME" "$HOME" \
-              --dir /nix \
-              --ro-bind "$HERE/nix/store" /nix/store \
-              -- "$TARGET" "$@"
-          elif [ -x "$HERE/proot" ]; then
-            PROOT_ARGS=(-r / -b "$HERE/nix/store:/nix/store")
-
-            for d in /dev /proc /sys /tmp /run /var "$HOME"; do
-              [ -d "$d" ] && PROOT_ARGS+=(-b "$d:$d")
-            done
-
-            for d in "''${COMMON_BINDS[@]}"; do
-              PROOT_ARGS+=(-b "$d:$d")
-            done
-
-            exec "$HERE/proot" \
-              "''${PROOT_ARGS[@]}" \
-              "$TARGET" "$@"
+          INTERNAL_LIBS="$WEMEET_OPT/lib:$WEMEET_OPT/bin/modules:$WEMEET_OPT/translations"
+          if [ -n "$NIX_LD_LIBRARY_PATH" ]; then
+            export LD_LIBRARY_PATH="$INTERNAL_LIBS:$NIX_LD_LIBRARY_PATH''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           else
-            echo "Error: Neither bwrap nor proot is functional on this system." >&2
-            exit 1
+            export LD_LIBRARY_PATH="$INTERNAL_LIBS''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           fi
+
+          # Inject AUR wrapper library
+          export LD_PRELOAD="$WEMEET_OPT/lib/libwemeetwrap.so''${LD_PRELOAD:+:$LD_PRELOAD}"
+
+          # Must cd into bin/ directory so the xcast engine can locate relative resources
+          cd "$WEMEET_OPT/bin"
+          exec "$WEMEET_OPT/bin/wemeetapp" "$@"
           EOF
           chmod +x AppDir/AppRun
 
-          # 4. Pack SquashFS filesystem
-          mksquashfs AppDir squashfs.img \
-            -root-owned -noappend \
-            -comp zstd -b 1M -Xcompression-level 22
+          # 4. Package AppImage using appimagetool
+          install -m755 ${appimagetool} ./appimagetool
 
-          # 5. Assemble AppImage binary directly with runtime
           mkdir -p "$out"
-          FINAL_APPIMAGE="$out/TencentMeeting-${wemeet.version}-x86_64.AppImage"
-          cat ${appimageRuntime} squashfs.img > "$FINAL_APPIMAGE"
-          chmod +x "$FINAL_APPIMAGE"
+          FINAL_APPIMAGE="$out/TencentMeeting-${wemeetConfig.version}-x86_64.AppImage"
 
-          # 6. Generate zsync delta file directly from final AppImage
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run \
+            --runtime-file "${appimageRuntime}" \
+            AppDir "$FINAL_APPIMAGE"
+
           cd "$out"
           zsyncmake -u "$(basename "$FINAL_APPIMAGE")" "$FINAL_APPIMAGE"
+          runHook postInstall
         '';
-      };
-    in
-      {
-        packages.${system} = {
-          default = appimage;
-          inherit appimage wemeet;
+
+        meta = with pkgs.lib; {
+          description = "Standalone native FHS AppImage of Tencent Meeting (WeMeet)";
+          homepage = "https://meeting.tencent.com";
+          platforms = [ "x86_64-linux" ];
+          license = licenses.unfree;
         };
       };
+    in
+    {
+      packages.${system} = {
+        default = appimage;
+        inherit appimage;
+      };
+    };
 }

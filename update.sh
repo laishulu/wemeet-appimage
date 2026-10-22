@@ -7,6 +7,7 @@ declare -A BIN_PKG_MAP=(
   [jq]="jq"
   [python3]="python3"
   [nix-hash]="nix"
+  [nix-prefetch-url]="nix"
   [nix-prefetch-git]="nix-prefetch-git"
 )
 
@@ -16,7 +17,6 @@ MISSING_PKGS=()
 for bin in "${REQUIRED_BINS[@]}"; do
   if ! command -v "$bin" &>/dev/null; then
     pkg="${BIN_PKG_MAP[$bin]}"
-    # Avoid adding duplicate packages
     if [[ ! " ${MISSING_PKGS[*]:-} " =~ [[:space:]]${pkg}[[:space:]] ]]; then
       MISSING_PKGS+=("$pkg")
     fi
@@ -50,7 +50,6 @@ trap 'rm -rf "$AUR_DIR"' EXIT
 curl -sSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=wemeet-bin" -o "$AUR_DIR/PKGBUILD"
 
 echo "==> 2. Parsing PKGBUILD variables..."
-# Safely source variables in an isolated subshell
 PARSED_VARS=$(bash -c '
   set -a
   source "'"$AUR_DIR/PKGBUILD"'" 2>/dev/null || true
@@ -86,19 +85,12 @@ fi
 echo "Version : $PKGVER"
 echo "Base URL: $DEB_URL"
 
-echo "==> 3. Updating latest.txt..."
-date -u -Iseconds > latest.txt
-
-echo "==> 4. Updating version.txt..."
-echo "$PKGVER" > "$VERSION_FILE"
-
-# Check if already up to date
+# Check if already up to date before overwriting version.txt
 if [ -f "$VERSION_FILE" ] && [ "$(cat "$VERSION_FILE")" = "$PKGVER" ]; then
-  echo "==> Package is already up to date ($PKGVER). Exiting."
-  exit 0
+  echo "==> Package is already up to date ($PKGVER)."
 fi
 
-echo "==> 5. Fetching AUR Git revision and hash..."
+echo "==> 3. Fetching latest AUR Git revision and hash for libwemeetwrap..."
 AUR_GIT_JSON=$(nix-prefetch-git --url "https://aur.archlinux.org/wemeet-bin.git" --rev "HEAD" --quiet)
 AUR_REV=$(echo "$AUR_GIT_JSON" | jq -r '.rev')
 WRAP_HASH=$(echo "$AUR_GIT_JSON" | jq -r '.hash')
@@ -106,7 +98,7 @@ WRAP_HASH=$(echo "$AUR_GIT_JSON" | jq -r '.hash')
 echo "AUR Commit: $AUR_REV"
 echo "Wrap Hash : $WRAP_HASH"
 
-echo "==> 6. Calculating SRI hash for deb package..."
+echo "==> 4. Calculating SRI hash for deb package..."
 if [[ "${SHA512:-}" =~ ^[a-fA-F0-9]{128}$ ]]; then
   DEB_HASH=$(nix-hash --type sha512 --to-sri "$SHA512")
 elif [[ "${SHA256:-}" =~ ^[a-fA-F0-9]{64}$ ]]; then
@@ -117,51 +109,89 @@ else
   DEB_HASH=$(nix-hash --type sha256 --to-sri "$RAW_SHA256")
 fi
 
-echo "Deb Hash  : $DEB_HASH"
+echo "Deb SRI Hash: $DEB_HASH"
 
-echo "==> 7. Updating $NIX_FILE..."
+echo "==> 5. Fetching latest release appimagetool and runtime SRI hashes..."
+APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/latest/download/appimagetool-x86_64.AppImage"
+RAW_APPIMAGETOOL_SHA256=$(nix-prefetch-url --type sha256 "$APPIMAGETOOL_URL")
+APPIMAGETOOL_HASH=$(nix-hash --type sha256 --to-sri "$RAW_APPIMAGETOOL_SHA256")
+echo "appimagetool SRI Hash: $APPIMAGETOOL_HASH"
+
+RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/latest/download/runtime-x86_64"
+RAW_RUNTIME_SHA256=$(nix-prefetch-url --type sha256 "$RUNTIME_URL")
+RUNTIME_HASH=$(nix-hash --type sha256 --to-sri "$RAW_RUNTIME_SHA256")
+echo "runtime SRI Hash     : $RUNTIME_HASH"
+
+echo "==> 6. Updating $NIX_FILE..."
 python3 -c "
 import re
 
 with open('$NIX_FILE', 'r') as f:
     content = f.read()
 
-# 1. Update libwemeetwrap derivation
+# 1. Update wemeetConfig version
 content = re.sub(
-    r'(libwemeetwrap\s*=\s*pkgs\.stdenv\.mkDerivation\s*\{[\s\S]*?version\s*=\s*\")[^\"]+(\";)',
-    r'\g<1>$PKGVER\2',
-    content
-)
-content = re.sub(
-    r'(url\s*=\s*\"https://aur\.archlinux\.org/wemeet-bin\.git\";\s*rev\s*=\s*\")[^\"]+(\";)',
-    r'\g<1>$AUR_REV\2',
-    content
-)
-content = re.sub(
-    r'(url\s*=\s*\"https://aur\.archlinux\.org/wemeet-bin\.git\";[\s\S]*?hash\s*=\s*\")[^\"]+(\";)',
-    r'\g<1>$WRAP_HASH\2',
+    r'(wemeetConfig\s*=\s*\{[\s\S]*?version\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$PKGVER\g<2>',
     content
 )
 
-# 2. Update wemeet derivation
+# 2. Update wemeetConfig url
 content = re.sub(
-    r'(wemeet\s*=\s*pkgs\.stdenv\.mkDerivation\s*\{[\s\S]*?version\s*=\s*\")[^\"]+(\";)',
-    r'\g<1>$PKGVER\2',
+    r'(wemeetConfig\s*=\s*\{[\s\S]*?url\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$DEB_URL\g<2>',
+    content
+)
+
+# 3. Update wemeetConfig hash
+content = re.sub(
+    r'(wemeetConfig\s*=\s*\{[\s\S]*?hash\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$DEB_HASH\g<2>',
+    content
+)
+
+# 4. Update libwemeetwrap git rev & hash
+content = re.sub(
+    r'(libwemeetwrap\s*=\s*pkgs\.stdenv\.mkDerivation\s*\{[\s\S]*?rev\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$AUR_REV\g<2>',
     content
 )
 content = re.sub(
-    r'(wemeet\s*=\s*pkgs\.stdenv\.mkDerivation\s*\{[\s\S]*?src\s*=\s*pkgs\.fetchurl\s*\{[\s\S]*?url\s*=\s*\")[^\"]+(\";)',
-    r'\g<1>$DEB_URL\2',
+    r'(libwemeetwrap\s*=\s*pkgs\.stdenv\.mkDerivation\s*\{[\s\S]*?hash\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$WRAP_HASH\g<2>',
+    content
+)
+
+# 5. Update appimagetool url & hash
+content = re.sub(
+    r'(appimagetool\s*=\s*pkgs\.fetchurl\s*\{[\s\S]*?url\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$APPIMAGETOOL_URL\g<2>',
     content
 )
 content = re.sub(
-    r'(wemeet\s*=\s*pkgs\.stdenv\.mkDerivation\s*\{[\s\S]*?src\s*=\s*pkgs\.fetchurl\s*\{[\s\S]*?hash\s*=\s*\")[^\"]+(\";)',
-    r'\g<1>$DEB_HASH\2',
+    r'(appimagetool\s*=\s*pkgs\.fetchurl\s*\{[\s\S]*?hash\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$APPIMAGETOOL_HASH\g<2>',
+    content
+)
+
+# 6. Update appimageRuntime url & hash
+content = re.sub(
+    r'(appimageRuntime\s*=\s*pkgs\.fetchurl\s*\{[\s\S]*?url\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$RUNTIME_URL\g<2>',
+    content
+)
+content = re.sub(
+    r'(appimageRuntime\s*=\s*pkgs\.fetchurl\s*\{[\s\S]*?hash\s*=\s*\")[^\"]+(\";)',
+    r'\g<1>$RUNTIME_HASH\g<2>',
     content
 )
 
 with open('$NIX_FILE', 'w') as f:
     f.write(content)
 "
+
+echo "==> 7. Updating latest.txt and version.txt..."
+date -u -Iseconds > latest.txt
+echo "$PKGVER" > "$VERSION_FILE"
 
 echo "==> Successfully updated $NIX_FILE!"
