@@ -78,7 +78,6 @@
           zsync
         ];
 
-        # Keep upstream FHS dynamic linking without nix-specific patchelf
         dontPatchELF = true;
         dontStrip = true;
 
@@ -92,7 +91,7 @@
         installPhase = ''
           runHook preInstall
 
-          mkdir -p AppDir/opt/wemeet AppDir/usr/bin AppDir/usr/share AppDir/usr/lib
+          mkdir -p AppDir/opt/wemeet AppDir/usr/bin AppDir/usr/share AppDir/usr/lib AppDir/etc/fonts
 
           # 1. Copy wemeet core binaries & assets
           cp -r opt/wemeet/* AppDir/opt/wemeet/
@@ -113,7 +112,11 @@
           ln -sf ../resources AppDir/opt/wemeet/lib/resources
           ln -sf ../translations AppDir/opt/wemeet/lib/translations
 
-          # 2. Setup desktop integration and icons
+          # 2. Bundle fallback Chinese font (wqy-microhei)
+          mkdir -p AppDir/usr/share/fonts/truetype/wqy
+          cp -r ${pkgs.wqy_microhei}/share/fonts/truetype/* AppDir/usr/share/fonts/truetype/wqy/
+
+          # 3. Setup desktop integration and icons
           if [ -d "AppDir/opt/wemeet/icons" ]; then
             cp -r AppDir/opt/wemeet/icons AppDir/usr/share/icons || true
           fi
@@ -127,13 +130,49 @@
           ln -sf usr/share/icons/hicolor/scalable/apps/wemeet.svg AppDir/wemeet.svg
           ln -sf wemeet.svg AppDir/.DirIcon
 
-          # 3. Create native AppRun entrypoint
+          # 4. Create isolated fonts.conf covering bundled fonts & host fonts
+          cat << 'EOF' > AppDir/etc/fonts/fonts.conf
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+          <fontconfig>
+            <!-- Bundled fallback fonts inside AppImage -->
+            <dir prefix="relative">../../usr/share/fonts</dir>
+
+            <!-- Host system fonts -->
+            <dir>/usr/share/fonts</dir>
+            <dir>/usr/local/share/fonts</dir>
+            <dir>/run/current-system/sw/share/fonts</dir>
+            <dir prefix="xdg">fonts</dir>
+            <dir>~/.local/share/fonts</dir>
+            <dir>~/.fonts</dir>
+
+            <!-- Cache settings -->
+            <cachedir prefix="xdg">fontconfig</cachedir>
+            <cachedir>/tmp/fontconfig-cache</cachedir>
+
+            <!-- Match CJK sans-serif fallback -->
+            <match target="pattern">
+              <test qual="any" name="family">
+                <string>sans-serif</string>
+              </test>
+              <edit name="family" mode="append" binding="weak">
+                <string>WenQuanYi Micro Hei</string>
+              </edit>
+            </match>
+          </fontconfig>
+          EOF
+
+          # 5. Create native AppRun entrypoint
           cat << 'EOF' > AppDir/AppRun
           #!/usr/bin/env bash
           set -e
 
           export APPDIR="''${APPDIR:-$(dirname "$(readlink -f "''${BASH_SOURCE[0]}")")}"
           WEMEET_OPT="$APPDIR/opt/wemeet"
+
+          # Font configuration
+          export FONTCONFIG_FILE="$APPDIR/etc/fonts/fonts.conf"
+          export FONTCONFIG_PATH="$APPDIR/etc/fonts"
 
           # Display backend compatibility
           export XDG_SESSION_TYPE=x11
@@ -174,7 +213,7 @@
           EOF
           chmod +x AppDir/AppRun
 
-          # 4. Package AppImage using appimagetool
+          # 6. Package AppImage using appimagetool
           install -m755 ${appimagetool} ./appimagetool
 
           mkdir -p "$out"
