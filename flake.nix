@@ -135,22 +135,15 @@
           <?xml version="1.0"?>
           <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
           <fontconfig>
-            <!-- Bundled fallback fonts inside AppImage -->
             <dir prefix="relative">../../usr/share/fonts</dir>
-
-            <!-- Host system fonts -->
             <dir>/usr/share/fonts</dir>
             <dir>/usr/local/share/fonts</dir>
             <dir>/run/current-system/sw/share/fonts</dir>
             <dir prefix="xdg">fonts</dir>
             <dir>~/.local/share/fonts</dir>
             <dir>~/.fonts</dir>
-
-            <!-- Cache settings -->
             <cachedir prefix="xdg">fontconfig</cachedir>
             <cachedir>/tmp/fontconfig-cache</cachedir>
-
-            <!-- Match CJK sans-serif fallback -->
             <match target="pattern">
               <test qual="any" name="family">
                 <string>sans-serif</string>
@@ -162,13 +155,60 @@
           </fontconfig>
           EOF
 
-          # 5. Create native AppRun entrypoint
+          # 5. Shim external openers to prevent LD_LIBRARY_PATH / LD_PRELOAD leak to host binaries
+          cat << 'EOF' > AppDir/usr/bin/host-opener-shim
+          #!/usr/bin/env bash
+          # Restore original host dynamic linker environment
+          if [ -n "$ORIG_LD_LIBRARY_PATH" ]; then
+            export LD_LIBRARY_PATH="$ORIG_LD_LIBRARY_PATH"
+          else
+            unset LD_LIBRARY_PATH
+          fi
+
+          if [ -n "$ORIG_LD_PRELOAD" ]; then
+            export LD_PRELOAD="$ORIG_LD_PRELOAD"
+          else
+            unset LD_PRELOAD
+          fi
+
+          # Remove AppImage directories from PATH when searching for real host commands
+          FILTERED_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^$APPDIR" | paste -sd:)
+          CMD_NAME="$(basename "$0")"
+          REAL_CMD=$(PATH="$FILTERED_PATH" which "$CMD_NAME" 2>/dev/null || true)
+
+          if [ -x "$REAL_CMD" ]; then
+            exec "$REAL_CMD" "$@"
+          else
+            # Fallback to xdg-open if the specific desktop opener is not found
+            REAL_XDG=$(PATH="$FILTERED_PATH" which xdg-open 2>/dev/null || true)
+            if [ -x "$REAL_XDG" ]; then
+              exec "$REAL_XDG" "$@"
+            fi
+            echo "Error: Host command $CMD_NAME not found" >&2
+            exit 1
+          fi
+          EOF
+          chmod +x AppDir/usr/bin/host-opener-shim
+
+          # Hook common URL/file open utilities to the shim
+          for cmd in xdg-open kde-open kde-open5 gnome-open gio; do
+            ln -sf host-opener-shim "AppDir/usr/bin/$cmd"
+          done
+
+          # 6. Create native AppRun entrypoint
           cat << 'EOF' > AppDir/AppRun
           #!/usr/bin/env bash
           set -e
 
           export APPDIR="''${APPDIR:-$(dirname "$(readlink -f "''${BASH_SOURCE[0]}")")}"
           WEMEET_OPT="$APPDIR/opt/wemeet"
+
+          # Preserve initial environment before modifying it
+          export ORIG_LD_LIBRARY_PATH="''${LD_LIBRARY_PATH:-}"
+          export ORIG_LD_PRELOAD="''${LD_PRELOAD:-}"
+
+          # Prioritize AppDir/usr/bin so our host-opener-shim intercepts calls to kde-open/xdg-open
+          export PATH="$APPDIR/usr/bin:$WEMEET_OPT/bin:$PATH"
 
           # Font configuration
           export FONTCONFIG_FILE="$APPDIR/etc/fonts/fonts.conf"
@@ -193,7 +233,6 @@
             fi
           fi
 
-          export PATH="$WEMEET_OPT/bin:$PATH"
           export QT_PLUGIN_PATH="$WEMEET_OPT/plugins"
           export XDG_DATA_DIRS="$APPDIR/usr/share:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 
@@ -213,7 +252,7 @@
           EOF
           chmod +x AppDir/AppRun
 
-          # 6. Package AppImage using appimagetool
+          # 7. Package AppImage using appimagetool
           install -m755 ${appimagetool} ./appimagetool
 
           mkdir -p "$out"
