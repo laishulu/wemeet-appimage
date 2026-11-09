@@ -62,7 +62,7 @@
 
       appimagetool = pkgs.fetchurl {
         url = "https://github.com/AppImage/appimagetool/releases/latest/download/appimagetool-x86_64.AppImage";
-        hash = "sha256-Yq68d8IUnpa1k7lNqbvRiB4JhKVjmf9tegO33dfJzmg=";
+        hash = "sha256-6MEWnEr2bDGE1+4RBxPUvgS+/mcfo1jiwVke6EBVOwM=";
       };
 
       appimage = pkgs.stdenvNoCC.mkDerivation {
