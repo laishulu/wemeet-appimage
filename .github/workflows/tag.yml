@@ -45,7 +45,7 @@ jobs:
           else
             # 截取当前 commit SHA 的前 7 位
             SHORT_SHA="${GITHUB_SHA::7}"
-            RELEASE_TAG="v${APP_VERSION}-${SHORT_SHA}"
+            RELEASE_TAG="c${SHORT_SHA}"
           fi
 
           echo "APP Version: ${APP_VERSION}"
@@ -55,7 +55,7 @@ jobs:
           NIXPKGS_ALLOW_UNFREE=1 nix build .#appimage
 
           # Target asset names using the exact tag
-          OUTPUT_APPIMAGE="WeMeet-${RELEASE_TAG}-x86_64.AppImage"
+          OUTPUT_APPIMAGE="WeMeet-${APP_VERSION}-${RELEASE_TAG}-x86_64.AppImage"
           OUTPUT_ZSYNC="${OUTPUT_APPIMAGE}.zsync"
 
           # Extract artifacts from the result directory
@@ -92,7 +92,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "WeMeet v${{ env.APP_VERSION }} (${{ env.RELEASE_TAG }})"
+          name: "WeMeet ${{ env.APP_VERSION }} (${{ env.RELEASE_TAG }})"
           files: |
             ${{ env.APPIMAGE_ASSET }}
             ${{ env.ZSYNC_ASSET }}
