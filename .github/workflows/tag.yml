@@ -55,7 +55,7 @@ jobs:
           NIXPKGS_ALLOW_UNFREE=1 nix build .#appimage
 
           # Target asset names using the exact tag
-          OUTPUT_APPIMAGE="WeMeet-${APP_VERSION}-${RELEASE_TAG}-x86_64.AppImage"
+          OUTPUT_APPIMAGE="WeMeet-${RELEASE_TAG}-x86_64.AppImage"
           OUTPUT_ZSYNC="${OUTPUT_APPIMAGE}.zsync"
 
           # Extract artifacts from the result directory
